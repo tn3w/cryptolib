@@ -1,5 +1,5 @@
 use argon2::{
-    password_hash::{PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHasher, SaltString},
     Argon2, Params, Version,
 };
 use libc::{c_void, madvise, mlock, munlock, MADV_DONTDUMP};
@@ -111,18 +111,18 @@ impl SecureArgon2id {
         let salt_string =
             SaltString::encode_b64(&protected_salt).map_err(|_| Argon2idError::HashingError)?;
 
-        let mut hash = self
+        let hash = self
             .argon2
             .hash_password(password, &salt_string)
-            .map_err(|_| Argon2idError::HashingError)?
-            .to_string()
-            .into_bytes();
+            .map_err(|_| Argon2idError::HashingError)?;
 
-        Self::protect_buffer(&mut hash)?;
-
+        let mut raw_hash = hash.hash.unwrap().as_bytes().to_vec();
+        raw_hash.extend_from_slice(&protected_salt);
+        
+        Self::protect_buffer(&mut raw_hash)?;
         Self::unprotect_buffer(&mut protected_salt)?;
 
-        Ok(hash)
+        Ok(raw_hash)
     }
 
     /// Verifies a password against a stored Argon2id hash.
@@ -140,17 +140,25 @@ impl SecureArgon2id {
     ) -> Result<bool, Argon2idError> {
         Self::validate_password(password)?;
 
-        if stored_hash.is_empty() {
+        if stored_hash.len() < SALT_LEN + HASH_LEN {
             return Err(Argon2idError::ValidationError);
         }
 
-        let hash_str =
-            std::str::from_utf8(stored_hash).map_err(|_| Argon2idError::ValidationError)?;
+        let (hash_part, salt_part) = stored_hash.split_at(stored_hash.len() - SALT_LEN);
+        let mut protected_salt = salt_part.to_vec();
+        Self::protect_buffer(&mut protected_salt)?;
 
-        let parsed_hash = argon2::password_hash::PasswordHash::new(hash_str)
-            .map_err(|_| Argon2idError::ValidationError)?;
+        let salt_string = SaltString::encode_b64(&protected_salt)
+            .map_err(|_| Argon2idError::HashingError)?;
 
-        Ok(self.argon2.verify_password(password, &parsed_hash).is_ok())
+        let hash = self.argon2
+            .hash_password(password, &salt_string)
+            .map_err(|_| Argon2idError::HashingError)?;
+
+        let result = hash.hash.unwrap().as_bytes() == hash_part;
+        Self::unprotect_buffer(&mut protected_salt)?;
+
+        Ok(result)
     }
 }
 
@@ -326,13 +334,12 @@ mod tests {
         let mut salts = Vec::new();
         for _ in 0..100 {
             let hash = hasher.hash_password(password).unwrap();
-            let hash_str = String::from_utf8_lossy(&hash);
-            let salt = hash_str.split('$').nth(4).unwrap();
+            let (_, salt) = hash.split_at(hash.len() - SALT_LEN);
             assert!(
-                !salts.contains(&salt.to_string()),
+                !salts.contains(&salt.to_vec()),
                 "Salt reuse detected - each hash should have a unique salt"
             );
-            salts.push(salt.to_string());
+            salts.push(salt.to_vec());
         }
     }
 

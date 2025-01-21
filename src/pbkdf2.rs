@@ -1,6 +1,6 @@
 use libc::{c_void, madvise, mlock, munlock, MADV_DONTDUMP};
 use pbkdf2::{
-    password_hash::{PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHasher, SaltString},
     Pbkdf2,
 };
 use rand::{rngs::OsRng, Rng};
@@ -11,8 +11,6 @@ use std::{ptr, sync::atomic::Ordering};
 const ITERATIONS: u32 = 600_000;
 const SALT_LEN: usize = 32; // 256 bits
 const HASH_LEN: usize = 32; // 256 bits
-const MIN_PASSWORD_LEN: usize = 8;
-const MAX_PASSWORD_LEN: usize = 1024;
 
 #[derive(Debug)]
 pub enum Pbkdf2Error {
@@ -67,13 +65,6 @@ impl SecurePbkdf2 {
         Ok(())
     }
 
-    fn validate_password(password: &[u8]) -> Result<(), Pbkdf2Error> {
-        if password.len() < MIN_PASSWORD_LEN || password.len() > MAX_PASSWORD_LEN {
-            return Err(Pbkdf2Error::ValidationError);
-        }
-        Ok(())
-    }
-
     /// Hashes a password using PBKDF2 with a random salt.
     ///
     /// # Arguments
@@ -82,8 +73,6 @@ impl SecurePbkdf2 {
     /// # Returns
     /// * `Result<Vec<u8>, Pbkdf2Error>` - The encoded hash string or an error
     pub fn hash_password(&self, password: &[u8]) -> Result<Vec<u8>, Pbkdf2Error> {
-        Self::validate_password(password)?;
-
         let mut salt = [0u8; SALT_LEN];
         OsRng.fill(&mut salt);
 
@@ -93,7 +82,7 @@ impl SecurePbkdf2 {
         let salt_string =
             SaltString::encode_b64(&protected_salt).map_err(|_| Pbkdf2Error::HashingError)?;
 
-        let mut hash = self
+        let hash = self
             .pbkdf2
             .hash_password_customized(
                 password,
@@ -105,14 +94,15 @@ impl SecurePbkdf2 {
                 },
                 &salt_string,
             )
-            .map_err(|_| Pbkdf2Error::HashingError)?
-            .to_string()
-            .into_bytes();
+            .map_err(|_| Pbkdf2Error::HashingError)?;
 
-        Self::protect_buffer(&mut hash)?;
+        let mut raw_hash = hash.hash.unwrap().as_bytes().to_vec();
+        raw_hash.extend_from_slice(&protected_salt);
+        
+        Self::protect_buffer(&mut raw_hash)?;
         Self::unprotect_buffer(&mut protected_salt)?;
 
-        Ok(hash)
+        Ok(raw_hash)
     }
 
     /// Verifies a password against a stored PBKDF2 hash.
@@ -128,19 +118,34 @@ impl SecurePbkdf2 {
         password: &[u8],
         stored_hash: &[u8],
     ) -> Result<bool, Pbkdf2Error> {
-        Self::validate_password(password)?;
-
-        if stored_hash.is_empty() {
+        if stored_hash.len() < SALT_LEN + HASH_LEN {
             return Err(Pbkdf2Error::ValidationError);
         }
 
-        let hash_str =
-            std::str::from_utf8(stored_hash).map_err(|_| Pbkdf2Error::ValidationError)?;
+        let (hash_part, salt_part) = stored_hash.split_at(stored_hash.len() - SALT_LEN);
+        let mut protected_salt = salt_part.to_vec();
+        Self::protect_buffer(&mut protected_salt)?;
 
-        let parsed_hash = pbkdf2::password_hash::PasswordHash::new(hash_str)
-            .map_err(|_| Pbkdf2Error::ValidationError)?;
+        let salt_string = SaltString::encode_b64(&protected_salt)
+            .map_err(|_| Pbkdf2Error::HashingError)?;
 
-        Ok(self.pbkdf2.verify_password(password, &parsed_hash).is_ok())
+        let hash = self.pbkdf2
+            .hash_password_customized(
+                password,
+                None,
+                None,
+                pbkdf2::Params {
+                    rounds: ITERATIONS,
+                    output_length: HASH_LEN,
+                },
+                &salt_string,
+            )
+            .map_err(|_| Pbkdf2Error::HashingError)?;
+
+        let result = hash.hash.unwrap().as_bytes() == hash_part;
+        Self::unprotect_buffer(&mut protected_salt)?;
+
+        Ok(result)
     }
 }
 
@@ -200,28 +205,6 @@ mod tests {
                 Err(Pbkdf2Error::ValidationError)
             ),
             "Invalid hash format should return ValidationError"
-        );
-    }
-
-    #[test]
-    fn test_password_length_validation() {
-        let hasher = SecurePbkdf2::new();
-        let short_password = b"short";
-        let long_password = vec![b'a'; MAX_PASSWORD_LEN + 1];
-
-        assert!(
-            matches!(
-                hasher.hash_password(short_password),
-                Err(Pbkdf2Error::ValidationError)
-            ),
-            "Short password should be rejected"
-        );
-        assert!(
-            matches!(
-                hasher.hash_password(&long_password),
-                Err(Pbkdf2Error::ValidationError)
-            ),
-            "Too long password should be rejected"
         );
     }
 

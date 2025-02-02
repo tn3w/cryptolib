@@ -4,7 +4,7 @@
 >
 > While this library implements secure cryptographic primitives following OWASP recommendations and best practices, it has **NOT YET** been thoroughly tested or audited by security professionals. The implementations use secure mechanics and follow cryptographic standards, but may contain undiscovered vulnerabilities.
 >
-> Security researchers are encouraged to test and analyze this software. If you discover any vulnerabilities or security issues, please report them through the GitHub Issues [here](https://github.com/tn3w/cryptolib/issues).
+> Security researchers are encouraged to test and analyze this software. If you discover any vulnerabilities or security issues, please report them through the [GitHub Issues](https://github.com/tn3w/cryptolib/issues).
 
 A secure Rust implementation of cryptographic primitives following OWASP security recommendations and best practices. This library provides high-level implementations of AES, Argon2id, PBKDF2, RSA, and post-quantum cryptography (Kyber and Dilithium) with extensive security measures.
 
